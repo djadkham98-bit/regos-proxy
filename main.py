@@ -1,7 +1,17 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 import requests
 
 app = Flask(__name__)
+
+def add_cors(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+@app.after_request
+def after_request(response):
+    return add_cors(response)
 
 @app.route('/', methods=['POST'])
 def proxy():
@@ -15,21 +25,17 @@ def proxy():
         headers={"Content-Type": "application/json;charset=utf-8"}
     )
     
-    resp = jsonify(response.json())
-    resp.headers['Access-Control-Allow-Origin'] = '*'
-    return resp
+    return make_response(response.text, 200, {'Content-Type': 'application/json'})
 
 @app.route('/', methods=['OPTIONS'])
 def options():
-    resp = app.make_default_options_response()
-    resp.headers['Access-Control-Allow-Origin'] = '*'
-    resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-    resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return resp
+    return make_response('', 204)
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"ok": True})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    import os
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
