@@ -4,7 +4,6 @@ import json
 import os
 
 app = Flask(__name__)
-
 DATA_FILE = '/tmp/suppliers.json'
 
 def add_cors(response):
@@ -19,6 +18,7 @@ def after_request(response):
 
 @app.route('/', methods=['OPTIONS'])
 @app.route('/suppliers', methods=['OPTIONS'])
+@app.route('/bonasera', methods=['OPTIONS'])
 def options():
     return make_response('', 204)
 
@@ -34,6 +34,48 @@ def proxy():
         headers={"Content-Type": "application/json;charset=utf-8"}
     )
     return make_response(response.text, 200, {'Content-Type': 'application/json'})
+
+# ── BONASERA FILTERED PROXY ───────────────────────────────────────────────────
+# Fetches retailreport/operations and filters only Golib aka sht items
+@app.route('/bonasera', methods=['POST'])
+def bonasera_proxy():
+    body = request.get_json()
+    endpoint = body.get('endpoint')
+    payload = body.get('payload', {})
+
+    # Fetch with large limit to get all in one request
+    payload['limit'] = 1000
+    payload['offset'] = payload.get('offset', 0)
+
+    response = requests.post(
+        endpoint + '/v1/retailreport/operations',
+        json=payload,
+        headers={"Content-Type": "application/json;charset=utf-8"}
+    )
+    data = response.json()
+
+    if not data.get('ok'):
+        return make_response(json.dumps(data), 200, {'Content-Type': 'application/json'})
+
+    # Filter only Golib aka sht items on server side
+    all_items = data.get('result', [])
+    filtered = []
+    for item in all_items:
+        item_data = item.get('item', {})
+        group = item_data.get('group', {})
+        path = group.get('path', '').lower()
+        if 'голиб ака шт' in path:
+            filtered.append(item)
+
+    result = {
+        'ok': True,
+        'result': filtered,
+        'total_all': len(all_items),
+        'total_filtered': len(filtered),
+        'next_offset': data.get('next_offset', 0)
+    }
+
+    return make_response(json.dumps(result, ensure_ascii=False), 200, {'Content-Type': 'application/json'})
 
 # ── SUPPLIERS STORAGE ─────────────────────────────────────────────────────────
 @app.route('/suppliers', methods=['GET'])
