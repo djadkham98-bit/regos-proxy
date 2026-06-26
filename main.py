@@ -102,3 +102,66 @@ def health():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
+
+# ── REPORT0021 with cost data ─────────────────────────────────────────────────
+import gzip
+import base64
+import time
+
+@app.route('/report0021', methods=['POST'])
+def report0021():
+    body = request.get_json()
+    endpoint = body.get('endpoint')
+    payload = body.get('payload', {})
+
+    # Step 1: Request report
+    r1 = requests.post(
+        endpoint + '/v1/reportrequest/report0021',
+        json=payload,
+        headers={"Content-Type": "application/json;charset=utf-8"}
+    )
+    d1 = r1.json()
+    if not d1.get('ok'):
+        return make_response(json.dumps(d1, ensure_ascii=False), 200, {'Content-Type': 'application/json'})
+
+    new_uuid = d1['result']['new_uuid']
+
+    # Step 2: Poll until ready
+    for attempt in range(30):
+        time.sleep(2)
+        r2 = requests.post(
+            endpoint + '/v1/reportprepared/get',
+            json={'request_uuid': new_uuid, 'include_data': True},
+            headers={"Content-Type": "application/json;charset=utf-8"}
+        )
+        d2 = r2.json()
+        if not d2.get('ok'):
+            continue
+        results = d2.get('result', [])
+        if not results:
+            continue
+        result = results[0]
+        data_b64 = result.get('data')
+        if not data_b64:
+            continue
+
+        # Step 3: Decode base64 + gunzip
+        try:
+            compressed = base64.b64decode(data_b64 + '==')
+            decompressed = gzip.decompress(compressed)
+            report_data = json.loads(decompressed.decode('utf-8'))
+            return make_response(
+                json.dumps({'ok': True, 'result': report_data}, ensure_ascii=False),
+                200, {'Content-Type': 'application/json'}
+            )
+        except Exception as e:
+            return make_response(
+                json.dumps({'ok': False, 'error': str(e), 'data_len': len(data_b64)}, ensure_ascii=False),
+                200, {'Content-Type': 'application/json'}
+            )
+
+    return make_response(json.dumps({'ok': False, 'error': 'Timeout'}), 200, {'Content-Type': 'application/json'})
+
+@app.route('/report0021', methods=['OPTIONS'])
+def report0021_options():
+    return make_response('', 204)
