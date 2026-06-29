@@ -94,6 +94,7 @@ def save_suppliers():
 
 _EP_T = "https://integration.regos.uz/gateway/out/e731e8c647b7455381ee73cae0696265"
 _EP_S = "https://integration.regos.uz/gateway/out/7e05c8de1e0544f4b9577038e95cd007"
+_EP_B = "https://integration.regos.uz/gateway/out/9011d723112b4dfe86f41839fdf603f7"
 _TZ   = timezone(timedelta(hours=5))
 
 _SUPPLIERS = [
@@ -229,6 +230,162 @@ def supplier_report():
         }, ensure_ascii=False),
         200, {"Content-Type": "application/json"})
 
+
+# ── REVENUE REPORT ───────────────────────────────────────────────────────────
+# GET /revenue-report?date=YYYY-MM-DD   (default: вчера)
+# Возвращает выручку по 7 магазинам + топ-5 товаров по количеству.
+
+_STORES_REV = [
+    {"id": "kadysh",  "name": "Кадышева",      "src": "tashkent",
+     "match": lambda s: "kilo" in s or "кило" in s or "кадыш" in s},
+    {"id": "chorsu",  "name": "Чорсу",          "src": "tashkent",
+     "match": lambda s: "yoyo" in s or "йойо" in s or "чорсу" in s},
+    {"id": "aziz",    "name": "Азиз бозор",     "src": "samarkand",
+     "match": lambda s: "гагарин" in s},
+    {"id": "marhabo", "name": "Мархабо",        "src": "samarkand",
+     "match": lambda s: "мархабо" in s},
+    {"id": "sogd",    "name": "Согдиана",       "src": "bonasera", "cashIds": [4, 5, 17, 18]},
+    {"id": "uzbek",   "name": "Узбекистанский", "src": "bonasera", "cashIds": [6, 13, 14, 15]},
+    {"id": "bonmen",  "name": "Bonasera Men",   "src": "bonasera", "cashIds": [10, 12, 16]},
+]
+
+def _get_cashes(ep):
+    try:
+        r = requests.post(ep + "/v1/operatingcash/get", json={},
+                          headers={"Content-Type": "application/json;charset=utf-8"}, timeout=15)
+        return r.json().get("result", [])
+    except Exception:
+        return []
+
+@app.route('/revenue-report', methods=['GET'])
+def revenue_report():
+    # Поддерживает два режима:
+    #   ?date=YYYY-MM-DD          — один день
+    #   ?start=YYYY-MM-DD&end=... — диапазон
+    start_str = request.args.get('start', '')
+    end_str   = request.args.get('end', '')
+    date_str  = request.args.get('date', '')
+
+    if start_str and end_str:
+        date_start, date_end = start_str, end_str
+    else:
+        if not date_str:
+            date_str = (datetime.now(_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+        date_start = date_end = date_str
+
+    try:
+        start_day = datetime.strptime(date_start, "%Y-%m-%d").replace(tzinfo=_TZ)
+        end_day   = datetime.strptime(date_end,   "%Y-%m-%d").replace(tzinfo=_TZ)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Format: YYYY-MM-DD"}), 400
+
+    start_ts = int(start_day.replace(hour=0,  minute=0,  second=0).timestamp())
+    end_ts   = int(end_day.replace(hour=23, minute=59, second=59).timestamp())
+
+    cash_map = {}
+    for c in _get_cashes(_EP_T):
+        sn = ((c.get("stock") or {}).get("name") or c.get("name") or "").lower()
+        for st in _STORES_REV:
+            if st["src"] == "tashkent" and st["match"](sn):
+                cash_map.setdefault(st["id"], []).append(c["id"])
+    for c in _get_cashes(_EP_S):
+        sn = ((c.get("stock") or {}).get("name") or c.get("name") or "").lower()
+        for st in _STORES_REV:
+            if st["src"] == "samarkand" and st["match"](sn):
+                cash_map.setdefault(st["id"], []).append(c["id"])
+
+    revenue  = {}
+    item_qty = {}
+
+    for st in _STORES_REV:
+        if st["src"] == "bonasera":
+            ep, ids = _EP_B, st["cashIds"]
+        elif st["src"] == "tashkent":
+            ep, ids = _EP_T, cash_map.get(st["id"], [])
+        else:
+            ep, ids = _EP_S, cash_map.get(st["id"], [])
+
+        ops = _fetch(ep, start_ts, end_ts, {"operating_cash_ids": ids}) if ids else []
+
+        store_rev = 0
+        for op in ops:
+            net_rev = (op.get("sale_amount") or 0) - (op.get("return_amount") or 0)
+            net_qty = (op.get("sale_quantity") or 0) - (op.get("return_quantity") or 0)
+            if net_rev > 0:
+                store_rev += net_rev
+            name = ((op.get("item") or {}).get("name") or "").strip()
+            if name and net_qty > 0:
+                item_qty[name] = item_qty.get(name, 0) + net_qty
+
+        revenue[st["name"]] = store_rev
+
+    top5 = sorted(item_qty.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    return make_response(
+        json.dumps({
+            "ok": True,
+            "date": date_start,
+            "date_start": date_start,
+            "date_end":   date_end,
+            "revenue": revenue,
+            "grand_total": sum(revenue.values()),
+            "top5_qty": [{"name": n, "qty": q} for n, q in top5],
+        }, ensure_ascii=False),
+        200, {"Content-Type": "application/json"})
+
+@app.route('/revenue-report', methods=['OPTIONS'])
+def revenue_report_options():
+    return make_response('', 204)
+
+# ── ITEM NAMES ───────────────────────────────────────────────────────────────
+# GET /item-names?ids=237,314,350,...
+# Возвращает {code: name} для указанных ID товаров.
+@app.route('/item-names', methods=['GET'])
+def item_names():
+    ids_str = request.args.get('ids', '')
+    if not ids_str:
+        return jsonify({"ok": False, "error": "ids required"}), 400
+    try:
+        ids = [int(x.strip()) for x in ids_str.split(',') if x.strip()]
+    except ValueError:
+        return jsonify({"ok": False, "error": "ids must be integers"}), 400
+
+    id_set = set(ids)
+    names = {}
+
+    def fetch_range(ep, offset, limit):
+        r = requests.post(ep + "/v1/item/get",
+                          json={"limit": limit, "offset": offset},
+                          headers={"Content-Type": "application/json;charset=utf-8"},
+                          timeout=30)
+        return r.json().get("result", [])
+
+    if not ids:
+        return jsonify({"ok": True, "names": {}})
+
+    min_id, max_id = min(ids), max(ids)
+
+    # Tashkent endpoint covers low IDs
+    for item in fetch_range(_EP_T, min_id - 1, max_id - min_id + 1):
+        if item.get("id") in id_set:
+            names[str(item["id"]).zfill(6)] = item.get("name", "")
+
+    # Samarkand endpoint covers high IDs (3500+)
+    high_ids = [i for i in ids if i >= 3500 and str(i).zfill(6) not in names]
+    if high_ids:
+        hi_min, hi_max = min(high_ids), max(high_ids)
+        for item in fetch_range(_EP_S, hi_min - 1, hi_max - hi_min + 1):
+            if item.get("id") in id_set:
+                names[str(item["id"]).zfill(6)] = item.get("name", "")
+
+    return make_response(
+        json.dumps({"ok": True, "names": names, "found": len(names)}, ensure_ascii=False),
+        200, {"Content-Type": "application/json"})
+
+@app.route('/item-names', methods=['OPTIONS'])
+def item_names_options():
+    return make_response('', 204)
+
 # ── HEALTH ────────────────────────────────────────────────────────────────────
 @app.route('/health', methods=['GET'])
 def health():
@@ -238,52 +395,4 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
-# ── REPORT0021 with cost data ─────────────────────────────────────────────────
-import gzip
-import base64
-import time
-
-@app.route('/report0021', methods=['POST'])
-def report0021():
-    body = request.get_json()
-    endpoint = body.get('endpoint')
-    payload = body.get('payload', {})
-
-    r1 = requests.post(endpoint + '/v1/reportrequest/report0021', json=payload,
-                       headers={"Content-Type": "application/json;charset=utf-8"})
-    d1 = r1.json()
-    if not d1.get('ok'):
-        return make_response(json.dumps(d1, ensure_ascii=False), 200, {'Content-Type': 'application/json'})
-
-    new_uuid = d1['result']['new_uuid']
-    for attempt in range(30):
-        time.sleep(2)
-        r2 = requests.post(endpoint + '/v1/reportprepared/get',
-                           json={'request_uuid': new_uuid, 'include_data': True},
-                           headers={"Content-Type": "application/json;charset=utf-8"})
-        d2 = r2.json()
-        if not d2.get('ok'):
-            continue
-        results = d2.get('result', [])
-        if not results:
-            continue
-        data_b64 = results[0].get('data')
-        if not data_b64:
-            continue
-        try:
-            compressed = base64.b64decode(data_b64 + '==')
-            decompressed = gzip.decompress(compressed)
-            report_data = json.loads(decompressed.decode('utf-8'))
-            return make_response(
-                json.dumps({'ok': True, 'result': report_data}, ensure_ascii=False),
-                200, {'Content-Type': 'application/json'})
-        except Exception as e:
-            return make_response(
-                json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False),
-                200, {'Content-Type': 'application/json'})
-
-    return make_response(json.dumps({'ok': False, 'error': 'Timeout'}), 200, {'Content-Type': 'application/json'})
-
-@app.route('/report0021', methods=['OPTIONS'])
-def report0021_options():
-    return make_response('', 204)
+# ── REPORT0021 with cost dat
