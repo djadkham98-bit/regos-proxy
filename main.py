@@ -294,8 +294,9 @@ def revenue_report():
             if st["src"] == "samarkand" and st["match"](sn):
                 cash_map.setdefault(st["id"], []).append(c["id"])
 
-    revenue  = {}
-    item_qty = {}
+    revenue        = {}
+    store_item_qty = {}   # store_name -> {item_name -> qty}
+    store_item_rev = {}   # store_name -> {item_name -> revenue}
 
     for st in _STORES_REV:
         if st["src"] == "bonasera":
@@ -307,6 +308,7 @@ def revenue_report():
 
         ops = _fetch(ep, start_ts, end_ts, {"operating_cash_ids": ids}) if ids else []
 
+        sname = st["name"]
         store_rev = 0
         for op in ops:
             net_rev = (op.get("sale_amount") or 0) - (op.get("return_amount") or 0)
@@ -314,12 +316,27 @@ def revenue_report():
             if net_rev > 0:
                 store_rev += net_rev
             name = ((op.get("item") or {}).get("name") or "").strip()
-            if name and net_qty > 0:
-                item_qty[name] = item_qty.get(name, 0) + net_qty
+            if name:
+                if net_qty > 0:
+                    store_item_qty.setdefault(sname, {})
+                    store_item_qty[sname][name] = store_item_qty[sname].get(name, 0) + net_qty
+                if net_rev > 0:
+                    store_item_rev.setdefault(sname, {})
+                    store_item_rev[sname][name] = store_item_rev[sname].get(name, 0) + net_rev
 
-        revenue[st["name"]] = store_rev
+        revenue[sname] = store_rev
 
-    top5 = sorted(item_qty.items(), key=lambda x: x[1], reverse=True)[:5]
+    # Топ-5 по каждому магазину
+    store_tops = {}
+    for sname in revenue:
+        qty_d = store_item_qty.get(sname, {})
+        rev_d = store_item_rev.get(sname, {})
+        store_tops[sname] = {
+            "top5_qty": [{"name": n, "qty": q}
+                         for n, q in sorted(qty_d.items(), key=lambda x: x[1], reverse=True)[:5]],
+            "top5_rev": [{"name": n, "rev": r}
+                         for n, r in sorted(rev_d.items(), key=lambda x: x[1], reverse=True)[:5]],
+        }
 
     return make_response(
         json.dumps({
@@ -329,7 +346,7 @@ def revenue_report():
             "date_end":   date_end,
             "revenue": revenue,
             "grand_total": sum(revenue.values()),
-            "top5_qty": [{"name": n, "qty": q} for n, q in top5],
+            "store_tops": store_tops,
         }, ensure_ascii=False),
         200, {"Content-Type": "application/json"})
 
@@ -375,24 +392,3 @@ def item_names():
     if high_ids:
         hi_min, hi_max = min(high_ids), max(high_ids)
         for item in fetch_range(_EP_S, hi_min - 1, hi_max - hi_min + 1):
-            if item.get("id") in id_set:
-                names[str(item["id"]).zfill(6)] = item.get("name", "")
-
-    return make_response(
-        json.dumps({"ok": True, "names": names, "found": len(names)}, ensure_ascii=False),
-        200, {"Content-Type": "application/json"})
-
-@app.route('/item-names', methods=['OPTIONS'])
-def item_names_options():
-    return make_response('', 204)
-
-# ── HEALTH ────────────────────────────────────────────────────────────────────
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"ok": True})
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# ── REPORT0021 with cost dat
